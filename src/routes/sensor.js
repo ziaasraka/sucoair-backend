@@ -4,142 +4,314 @@
 // ESP32 kirim data ke:
 //   POST /api/sensor/data
 //   Header: X-Device-Key: <ESP32_DEVICE_KEY>
-//   Body JSON: { inspection_id, pm25, pm10, co, no2, so2, o3, temp, humidity, pressure }
+//   Body JSON: { inspection_id, pm25, pm10, co, no2, so2, o3, temperature, humidity, pressure }
 //
-// GET /api/sensor/latest   — data terbaru (untuk polling frontend)
-// GET /api/sensor/history  — riwayat (query: limit, inspection_id)
+// GET /api/sensor/latest   — data terbaru untuk polling frontend
+// GET /api/sensor/history  — riwayat data sensor
+// GET /api/sensor/stats    — statistik ringkasan
 // ============================================================
+
 const express = require('express');
-const db      = require('../utils/database');
+const db = require('../utils/database');
 const { hitungISPU } = require('../utils/fuzzyMamdani');
 const { requireAuth } = require('../middleware/auth');
+
+const {
+  getActiveInspection,
+  finalizeExpiredInspections
+} = require('../utils/inspectionAutoClose');
 
 const router = express.Router();
 
 // ── Middleware: Device Key untuk ESP32 ───────────────────────
 function requireDeviceKey(req, res, next) {
   const key = req.headers['x-device-key'];
+
   if (key !== (process.env.ESP32_DEVICE_KEY || 'ESP32_SUCOFINDO_MANADO_2025')) {
-    return res.status(401).json({ success: false, message: 'Device key tidak valid.' });
+    return res.status(401).json({
+      success: false,
+      message: 'Device key tidak valid.'
+    });
   }
+
   next();
 }
 
 // ── POST /api/sensor/data — Terima data dari ESP32 ───────────
 router.post('/data', requireDeviceKey, (req, res) => {
-  const {
-    inspection_id,
-    pm25, pm10, co, no2, so2, o3,
-    temperature, humidity, pressure,
-  } = req.body;
-
-  // Validasi nilai numerik
-  const vals = [pm25, pm10, co, no2, so2, o3];
-  if (vals.some(v => v === undefined || v === null || isNaN(v))) {
-    return res.status(400).json({ success: false, message: 'Data sensor tidak lengkap atau tidak valid.' });
-  }
-
-  // Hitung ISPU dengan Fuzzy Mamdani
-  const fuzzy = hitungISPU(
-    parseFloat(pm25), parseFloat(pm10), parseFloat(co),
-    parseFloat(no2),  parseFloat(so2),  parseFloat(o3)
-  );
-
-  // Simpan ke database
-  const result = db.prepare(`
-    INSERT INTO sensor_data
-      (inspection_id, pm25, pm10, co, no2, so2, o3,
-       temperature, humidity, pressure, ispu, kategori, membership)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    inspection_id || null,
-    pm25, pm10, co, no2, so2, o3,
-    temperature || null, humidity || null, pressure || null,
-    fuzzy.ispu, fuzzy.kategori,
-    JSON.stringify(fuzzy.membership)
-  );
-
-  // Broadcast ke semua client WebSocket yang terkoneksi
-  const payload = JSON.stringify({
-    type: 'sensor_update',
-    data: {
-      id:           result.lastInsertRowid,
+  try {
+    const {
       inspection_id,
-      recorded_at:  new Date().toISOString(),
-      pm25, pm10, co, no2, so2, o3,
-      temperature, humidity, pressure,
-      ispu:         fuzzy.ispu,
-      kategori:     fuzzy.kategori,
-      membership:   fuzzy.membership,
-    },
-  });
+      pm25,
+      pm10,
+      co,
+      no2,
+      so2,
+      o3,
+      temperature,
+      humidity,
+      pressure
+    } = req.body;
 
-  // wsBroadcast di-inject dari server.js
-  if (req.app.locals.wsBroadcast) {
-    req.app.locals.wsBroadcast(payload);
+    // Cek apakah ada sesi inspeksi yang sudah habis durasinya
+    finalizeExpiredInspections();
+
+    // Ambil sesi inspeksi aktif
+    // Kalau ada sesi aktif, data ESP32 otomatis masuk ke inspection_id sesi itu
+    // Kalau tidak ada sesi aktif, pakai inspection_id dari body atau null
+    const activeInspection = getActiveInspection();
+    const targetInspectionId = activeInspection ? activeInspection.id : (inspection_id || null);
+
+    // Validasi nilai polutan utama
+    const vals = [pm25, pm10, co, no2, so2, o3];
+
+    if (vals.some((v) => v === undefined || v === null || isNaN(v))) {
+      return res.status(400).json({
+        success: false,
+        message: 'Data sensor tidak lengkap atau tidak valid.'
+      });
+    }
+
+    const nPm25 = parseFloat(pm25);
+    const nPm10 = parseFloat(pm10);
+    const nCo = parseFloat(co);
+    const nNo2 = parseFloat(no2);
+    const nSo2 = parseFloat(so2);
+    const nO3 = parseFloat(o3);
+
+    const nTemperature =
+      temperature === undefined || temperature === null || isNaN(temperature)
+        ? null
+        : parseFloat(temperature);
+
+    const nHumidity =
+      humidity === undefined || humidity === null || isNaN(humidity)
+        ? null
+        : parseFloat(humidity);
+
+    const nPressure =
+      pressure === undefined || pressure === null || isNaN(pressure)
+        ? null
+        : parseFloat(pressure);
+
+    // Hitung ISPU dengan Fuzzy Mamdani
+    const fuzzy = hitungISPU(
+      nPm25,
+      nPm10,
+      nCo,
+      nNo2,
+      nSo2,
+      nO3
+    );
+
+    // Simpan ke database
+    const result = db.prepare(`
+      INSERT INTO sensor_data
+        (
+          inspection_id,
+          pm25,
+          pm10,
+          co,
+          no2,
+          so2,
+          o3,
+          temperature,
+          humidity,
+          pressure,
+          ispu,
+          kategori,
+          membership
+        )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      targetInspectionId,
+      nPm25,
+      nPm10,
+      nCo,
+      nNo2,
+      nSo2,
+      nO3,
+      nTemperature,
+      nHumidity,
+      nPressure,
+      fuzzy.ispu,
+      fuzzy.kategori,
+      JSON.stringify(fuzzy.membership)
+    );
+
+    const insertedData = {
+      id: result.lastInsertRowid,
+      inspection_id: targetInspectionId,
+      recorded_at: new Date().toISOString(),
+      pm25: nPm25,
+      pm10: nPm10,
+      co: nCo,
+      no2: nNo2,
+      so2: nSo2,
+      o3: nO3,
+      temperature: nTemperature,
+      humidity: nHumidity,
+      pressure: nPressure,
+      ispu: fuzzy.ispu,
+      kategori: fuzzy.kategori,
+      membership: fuzzy.membership
+    };
+
+    // Broadcast ke semua client WebSocket yang terkoneksi
+    const payload = JSON.stringify({
+      type: 'sensor_update',
+      data: insertedData
+    });
+
+    if (req.app.locals.wsBroadcast) {
+      req.app.locals.wsBroadcast(payload);
+    }
+
+    res.json({
+      success: true,
+      inspection_id: targetInspectionId,
+      ispu: fuzzy.ispu,
+      kategori: fuzzy.kategori,
+      message: 'Data berhasil disimpan.',
+      data: insertedData
+    });
+  } catch (err) {
+    console.error('[POST SENSOR DATA ERROR]', err.message);
+
+    res.status(500).json({
+      success: false,
+      message: 'Gagal menyimpan data sensor.',
+      error: err.message
+    });
   }
-
-  res.json({
-    success:  true,
-    ispu:     fuzzy.ispu,
-    kategori: fuzzy.kategori,
-    message:  'Data berhasil disimpan.',
-  });
 });
 
-// ── GET /api/sensor/latest — data terbaru (untuk frontend polling) ──
+// ── GET /api/sensor/latest — data terbaru untuk frontend polling ──
 router.get('/latest', requireAuth, (req, res) => {
-  const row = db.prepare(
-    'SELECT * FROM sensor_data ORDER BY recorded_at DESC LIMIT 1'
-  ).get();
+  try {
+    finalizeExpiredInspections();
 
-  if (!row) return res.status(404).json({ success: false, message: 'Belum ada data.' });
-  if (row.membership) row.membership = JSON.parse(row.membership);
-  res.json({ success: true, data: row });
+    const row = db.prepare(`
+      SELECT *
+      FROM sensor_data
+      ORDER BY recorded_at DESC
+      LIMIT 1
+    `).get();
+
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        message: 'Belum ada data.'
+      });
+    }
+
+    if (row.membership) {
+      row.membership = JSON.parse(row.membership);
+    }
+
+    res.json({
+      success: true,
+      data: row
+    });
+  } catch (err) {
+    console.error('[GET SENSOR LATEST ERROR]', err.message);
+
+    res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil data sensor terbaru.',
+      error: err.message
+    });
+  }
 });
 
 // ── GET /api/sensor/history — riwayat data ───────────────────
 router.get('/history', requireAuth, (req, res) => {
-  const { inspection_id, limit = 288, offset = 0 } = req.query;
-  let sql = 'SELECT * FROM sensor_data WHERE 1=1';
-  const params = [];
+  try {
+    finalizeExpiredInspections();
 
-  if (inspection_id) { sql += ' AND inspection_id = ?'; params.push(inspection_id); }
-  sql += ' ORDER BY recorded_at DESC LIMIT ? OFFSET ?';
-  params.push(+limit, +offset);
+    const { inspection_id, limit = 288, offset = 0 } = req.query;
 
-  const rows = db.prepare(sql).all(...params).map(r => ({
-    ...r,
-    membership: r.membership ? JSON.parse(r.membership) : null,
-  }));
+    let sql = `
+      SELECT *
+      FROM sensor_data
+      WHERE 1=1
+    `;
 
-  res.json({ success: true, count: rows.length, data: rows });
+    const params = [];
+
+    if (inspection_id) {
+      sql += ' AND inspection_id = ?';
+      params.push(inspection_id);
+    }
+
+    sql += ' ORDER BY recorded_at DESC LIMIT ? OFFSET ?';
+    params.push(Number(limit), Number(offset));
+
+    const rows = db.prepare(sql).all(...params).map((row) => ({
+      ...row,
+      membership: row.membership ? JSON.parse(row.membership) : null
+    }));
+
+    res.json({
+      success: true,
+      count: rows.length,
+      data: rows
+    });
+  } catch (err) {
+    console.error('[GET SENSOR HISTORY ERROR]', err.message);
+
+    res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil riwayat data sensor.',
+      error: err.message
+    });
+  }
 });
 
 // ── GET /api/sensor/stats — statistik ringkasan ──────────────
 router.get('/stats', requireAuth, (req, res) => {
-  const { inspection_id } = req.query;
-  let where = inspection_id ? 'WHERE inspection_id = ?' : '';
-  const params = inspection_id ? [inspection_id] : [];
+  try {
+    finalizeExpiredInspections();
 
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*)   AS total,
-      ROUND(AVG(pm25),2)  AS avg_pm25,
-      ROUND(MAX(pm25),2)  AS max_pm25,
-      ROUND(AVG(pm10),2)  AS avg_pm10,
-      ROUND(MAX(pm10),2)  AS max_pm10,
-      ROUND(AVG(co),3)    AS avg_co,
-      ROUND(AVG(no2),1)   AS avg_no2,
-      ROUND(AVG(so2),1)   AS avg_so2,
-      ROUND(AVG(o3),1)    AS avg_o3,
-      ROUND(AVG(ispu),0)  AS avg_ispu,
-      MAX(ispu)           AS max_ispu,
-      MIN(ispu)           AS min_ispu
-    FROM sensor_data ${where}
-  `).get(...params);
+    const { inspection_id } = req.query;
 
-  res.json({ success: true, data: stats });
+    const where = inspection_id ? 'WHERE inspection_id = ?' : '';
+    const params = inspection_id ? [inspection_id] : [];
+
+    const stats = db.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        ROUND(AVG(pm25), 2) AS avg_pm25,
+        ROUND(MAX(pm25), 2) AS max_pm25,
+        ROUND(AVG(pm10), 2) AS avg_pm10,
+        ROUND(MAX(pm10), 2) AS max_pm10,
+        ROUND(AVG(co), 3) AS avg_co,
+        ROUND(AVG(no2), 1) AS avg_no2,
+        ROUND(AVG(so2), 1) AS avg_so2,
+        ROUND(AVG(o3), 1) AS avg_o3,
+        ROUND(AVG(temperature), 2) AS avg_temperature,
+        ROUND(AVG(humidity), 2) AS avg_humidity,
+        ROUND(AVG(pressure), 2) AS avg_pressure,
+        ROUND(AVG(ispu), 0) AS avg_ispu,
+        MAX(ispu) AS max_ispu,
+        MIN(ispu) AS min_ispu
+      FROM sensor_data
+      ${where}
+    `).get(...params);
+
+    res.json({
+      success: true,
+      data: stats
+    });
+  } catch (err) {
+    console.error('[GET SENSOR STATS ERROR]', err.message);
+
+    res.status(500).json({
+      success: false,
+      message: 'Gagal mengambil statistik sensor.',
+      error: err.message
+    });
+  }
 });
 
 module.exports = router;
