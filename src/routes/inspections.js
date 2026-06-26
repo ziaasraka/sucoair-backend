@@ -77,8 +77,45 @@ router.put('/:id/selesai', (req, res) => {
 
 // DELETE /api/inspections/:id
 router.delete('/:id', (req, res) => {
-  db.prepare('DELETE FROM inspections WHERE id = ?').run(req.params.id);
-  res.json({ success: true, message: 'Sesi inspeksi dihapus.' });
+  try {
+    const { id } = req.params;
+
+    const insp = db.prepare('SELECT id FROM inspections WHERE id = ?').get(id);
+
+    if (!insp) {
+      return res.status(404).json({
+        success: false,
+        message: 'Sesi inspeksi tidak ditemukan.'
+      });
+    }
+
+    // Hapus data terkait terlebih dahulu
+    db.prepare('DELETE FROM sensor_data WHERE inspection_id = ?').run(id);
+    db.prepare('DELETE FROM reports WHERE inspection_id = ?').run(id);
+
+    // Baru hapus data inspeksi
+    const result = db.prepare('DELETE FROM inspections WHERE id = ?').run(id);
+
+    if (result.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Sesi inspeksi gagal dihapus.'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Sesi inspeksi berhasil dihapus.'
+    });
+  } catch (err) {
+    console.error('[DELETE INSPECTION ERROR]', err.message);
+
+    res.status(500).json({
+      success: false,
+      message: 'Gagal menghapus sesi inspeksi.',
+      error: err.message
+    });
+  }
 });
 
 // GET /api/inspections/:id/sensor — riwayat data sensor (paginasi)
