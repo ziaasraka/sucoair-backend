@@ -4,7 +4,7 @@
 // ESP32 kirim data ke:
 //   POST /api/sensor/data
 //   Header: X-Device-Key: <ESP32_DEVICE_KEY>
-//   Body JSON: { inspection_id, pm25, pm10, co, no2, so2, o3, temperature, humidity, pressure }
+//   Body JSON: { pm25, pm10, co, no2, so2, o3, temperature, humidity, pressure }
 //
 // GET /api/sensor/latest   — data terbaru untuk polling frontend
 // GET /api/sensor/history  — riwayat data sensor
@@ -17,7 +17,6 @@ const { hitungISPU } = require('../utils/fuzzyMamdani');
 const { requireAuth } = require('../middleware/auth');
 
 const {
-  getActiveInspection,
   finalizeExpiredInspections
 } = require('../utils/inspectionAutoClose');
 
@@ -41,7 +40,6 @@ function requireDeviceKey(req, res, next) {
 router.post('/data', requireDeviceKey, (req, res) => {
   try {
     const {
-      inspection_id,
       pm25,
       pm10,
       co,
@@ -53,14 +51,45 @@ router.post('/data', requireDeviceKey, (req, res) => {
       pressure
     } = req.body;
 
-    // Cek apakah ada sesi inspeksi yang sudah habis durasinya
+    // Cek dulu apakah ada sesi inspeksi yang durasinya sudah habis
     finalizeExpiredInspections();
 
-    // Ambil sesi inspeksi aktif
-    // Kalau ada sesi aktif, data ESP32 otomatis masuk ke inspection_id sesi itu
-    // Kalau tidak ada sesi aktif, pakai inspection_id dari body atau null
-    const activeInspection = getActiveInspection();
-    const targetInspectionId = activeInspection ? activeInspection.id : (inspection_id || null);
+    // Ambil semua sesi yang sedang berlangsung
+    const activeRows = db.prepare(`
+      SELECT
+        id,
+        company_id,
+        location,
+        status,
+        started_at,
+        duration
+      FROM inspections
+      WHERE status = 'Berlangsung'
+      ORDER BY started_at DESC
+    `).all();
+
+    // Kalau tidak ada sesi aktif, data sensor tidak disimpan
+    if (activeRows.length === 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Tidak ada sesi inspeksi yang sedang berlangsung. Data sensor tidak disimpan.'
+      });
+    }
+
+    // Kalau ada lebih dari satu sesi aktif, data sensor ditolak
+    // Ini penting supaya data ESP32 tidak salah masuk ke perusahaan lain
+    if (activeRows.length > 1) {
+      return res.status(409).json({
+        success: false,
+        message: 'Ada lebih dari satu sesi inspeksi yang sedang berlangsung. Selesaikan atau hapus sesi lain dulu agar data ESP32 tidak salah masuk.',
+        active_sessions: activeRows
+      });
+    }
+
+    // Kalau tepat satu sesi aktif, data sensor masuk ke sesi itu
+    const activeInspection = activeRows[0];
+    const targetInspectionId = activeInspection.id;
+    const targetCompanyId = activeInspection.company_id;
 
     // Validasi nilai polutan utama
     const vals = [pm25, pm10, co, no2, so2, o3];
@@ -141,6 +170,7 @@ router.post('/data', requireDeviceKey, (req, res) => {
 
     const insertedData = {
       id: result.lastInsertRowid,
+      company_id: targetCompanyId,
       inspection_id: targetInspectionId,
       recorded_at: new Date().toISOString(),
       pm25: nPm25,
@@ -169,10 +199,11 @@ router.post('/data', requireDeviceKey, (req, res) => {
 
     res.json({
       success: true,
+      company_id: targetCompanyId,
       inspection_id: targetInspectionId,
       ispu: fuzzy.ispu,
       kategori: fuzzy.kategori,
-      message: 'Data berhasil disimpan.',
+      message: 'Data berhasil disimpan ke sesi inspeksi aktif.',
       data: insertedData
     });
   } catch (err) {
