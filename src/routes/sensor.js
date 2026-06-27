@@ -4,9 +4,27 @@
 // ESP32 kirim data ke:
 //   POST /api/sensor/data
 //   Header: X-Device-Key: <ESP32_DEVICE_KEY>
-//   Body JSON: { pm25, pm10, co, no2, so2, o3, temperature, humidity, pressure }
+//   Body JSON: {
+//     pm25,
+//     pm10,
+//     co,
+//     no2,
+//     so2,
+//     o3,
+//     temperature,
+//     humidity,
+//     pressure
+//   }
 //
-// GET /api/sensor/latest   — data terbaru untuk polling frontend
+// Alur penyimpanan:
+// - Jika ada 1 sesi inspeksi Berlangsung:
+//   data disimpan dengan inspection_id sesi aktif.
+// - Jika tidak ada sesi inspeksi Berlangsung:
+//   data tetap disimpan sebagai monitoring umum dengan inspection_id = null.
+// - Jika ada lebih dari 1 sesi inspeksi Berlangsung:
+//   data ditolak agar tidak salah masuk perusahaan.
+//
+// GET /api/sensor/latest   — data terbaru untuk dashboard
 // GET /api/sensor/history  — riwayat data sensor
 // GET /api/sensor/stats    — statistik ringkasan
 // ============================================================
@@ -20,9 +38,15 @@ const {
   finalizeExpiredInspections
 } = require('../utils/inspectionAutoClose');
 
+const {
+  cleanupOldMonitoringData
+} = require('../utils/sensorCleanup');
+
 const router = express.Router();
 
-// ── Middleware: Device Key untuk ESP32 ───────────────────────
+// ============================================================
+// Middleware: validasi Device Key untuk ESP32
+// ============================================================
 function requireDeviceKey(req, res, next) {
   const key = req.headers['x-device-key'];
 
@@ -36,7 +60,9 @@ function requireDeviceKey(req, res, next) {
   next();
 }
 
-// ── POST /api/sensor/data — Terima data dari ESP32 ───────────
+// ============================================================
+// POST /api/sensor/data — menerima data dari ESP32
+// ============================================================
 router.post('/data', requireDeviceKey, (req, res) => {
   try {
     const {
@@ -51,10 +77,14 @@ router.post('/data', requireDeviceKey, (req, res) => {
       pressure
     } = req.body;
 
-    // Cek dulu apakah ada sesi inspeksi yang durasinya sudah habis
+    // Tutup otomatis sesi inspeksi yang durasinya sudah habis
     finalizeExpiredInspections();
 
-    // Ambil semua sesi yang sedang berlangsung
+    // Hapus data monitoring umum yang lebih dari 1 hari
+    // Hanya menghapus data dengan inspection_id null / kosong
+    cleanupOldMonitoringData();
+
+    // Ambil semua sesi inspeksi yang sedang berlangsung
     const activeRows = db.prepare(`
       SELECT
         id,
@@ -68,16 +98,13 @@ router.post('/data', requireDeviceKey, (req, res) => {
       ORDER BY started_at DESC
     `).all();
 
-    // Kalau tidak ada sesi aktif, data sensor tidak disimpan
-    if (activeRows.length === 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'Tidak ada sesi inspeksi yang sedang berlangsung. Data sensor tidak disimpan.'
-      });
-    }
+    let activeInspection = null;
+    let targetInspectionId = null;
+    let targetCompanyId = null;
+    let saveMode = 'monitoring';
 
-    // Kalau ada lebih dari satu sesi aktif, data sensor ditolak
-    // Ini penting supaya data ESP32 tidak salah masuk ke perusahaan lain
+    // Kalau ada lebih dari satu sesi aktif, data ditolak
+    // Karena satu ESP32 tidak boleh masuk ke banyak sesi sekaligus
     if (activeRows.length > 1) {
       return res.status(409).json({
         success: false,
@@ -86,10 +113,19 @@ router.post('/data', requireDeviceKey, (req, res) => {
       });
     }
 
-    // Kalau tepat satu sesi aktif, data sensor masuk ke sesi itu
-    const activeInspection = activeRows[0];
-    const targetInspectionId = activeInspection.id;
-    const targetCompanyId = activeInspection.company_id;
+    // Kalau ada tepat satu sesi aktif, data masuk ke sesi itu
+    if (activeRows.length === 1) {
+      activeInspection = activeRows[0];
+      targetInspectionId = activeInspection.id;
+      targetCompanyId = activeInspection.company_id;
+      saveMode = 'inspection';
+    }
+
+    // Kalau tidak ada sesi aktif:
+    // targetInspectionId tetap null
+    // targetCompanyId tetap null
+    // saveMode tetap monitoring
+    // Data tetap disimpan untuk dashboard umum
 
     // Validasi nilai polutan utama
     const vals = [pm25, pm10, co, no2, so2, o3];
@@ -133,7 +169,8 @@ router.post('/data', requireDeviceKey, (req, res) => {
       nO3
     );
 
-    // Simpan ke database
+    // Simpan data ke database
+    // Jika tidak ada sesi aktif, targetInspectionId = null
     const result = db.prepare(`
       INSERT INTO sensor_data
         (
@@ -170,6 +207,7 @@ router.post('/data', requireDeviceKey, (req, res) => {
 
     const insertedData = {
       id: result.lastInsertRowid,
+      mode: saveMode,
       company_id: targetCompanyId,
       inspection_id: targetInspectionId,
       recorded_at: new Date().toISOString(),
@@ -187,7 +225,7 @@ router.post('/data', requireDeviceKey, (req, res) => {
       membership: fuzzy.membership
     };
 
-    // Broadcast ke semua client WebSocket yang terkoneksi
+    // Broadcast realtime ke client WebSocket
     const payload = JSON.stringify({
       type: 'sensor_update',
       data: insertedData
@@ -199,11 +237,15 @@ router.post('/data', requireDeviceKey, (req, res) => {
 
     res.json({
       success: true,
+      mode: saveMode,
       company_id: targetCompanyId,
       inspection_id: targetInspectionId,
       ispu: fuzzy.ispu,
       kategori: fuzzy.kategori,
-      message: 'Data berhasil disimpan ke sesi inspeksi aktif.',
+      message:
+        saveMode === 'inspection'
+          ? 'Data berhasil disimpan ke sesi inspeksi aktif.'
+          : 'Data berhasil disimpan sebagai monitoring umum tanpa sesi inspeksi.',
       data: insertedData
     });
   } catch (err) {
@@ -217,10 +259,13 @@ router.post('/data', requireDeviceKey, (req, res) => {
   }
 });
 
-// ── GET /api/sensor/latest — data terbaru untuk frontend polling ──
+// ============================================================
+// GET /api/sensor/latest — data terbaru untuk dashboard
+// ============================================================
 router.get('/latest', requireAuth, (req, res) => {
   try {
     finalizeExpiredInspections();
+    cleanupOldMonitoringData();
 
     const row = db.prepare(`
       SELECT *
@@ -255,12 +300,26 @@ router.get('/latest', requireAuth, (req, res) => {
   }
 });
 
-// ── GET /api/sensor/history — riwayat data ───────────────────
+// ============================================================
+// GET /api/sensor/history — riwayat data sensor
+//
+// Query optional:
+// ?inspection_id=INS-xxxx
+// ?limit=288
+// ?offset=0
+// ?monitoring_only=true
+// ============================================================
 router.get('/history', requireAuth, (req, res) => {
   try {
     finalizeExpiredInspections();
+    cleanupOldMonitoringData();
 
-    const { inspection_id, limit = 288, offset = 0 } = req.query;
+    const {
+      inspection_id,
+      monitoring_only,
+      limit = 288,
+      offset = 0
+    } = req.query;
 
     let sql = `
       SELECT *
@@ -273,6 +332,10 @@ router.get('/history', requireAuth, (req, res) => {
     if (inspection_id) {
       sql += ' AND inspection_id = ?';
       params.push(inspection_id);
+    }
+
+    if (monitoring_only === 'true') {
+      sql += ` AND (inspection_id IS NULL OR inspection_id = '')`;
     }
 
     sql += ' ORDER BY recorded_at DESC LIMIT ? OFFSET ?';
@@ -299,15 +362,34 @@ router.get('/history', requireAuth, (req, res) => {
   }
 });
 
-// ── GET /api/sensor/stats — statistik ringkasan ──────────────
+// ============================================================
+// GET /api/sensor/stats — statistik ringkasan sensor
+//
+// Query optional:
+// ?inspection_id=INS-xxxx
+// ?monitoring_only=true
+// ============================================================
 router.get('/stats', requireAuth, (req, res) => {
   try {
     finalizeExpiredInspections();
+    cleanupOldMonitoringData();
 
-    const { inspection_id } = req.query;
+    const {
+      inspection_id,
+      monitoring_only
+    } = req.query;
 
-    const where = inspection_id ? 'WHERE inspection_id = ?' : '';
-    const params = inspection_id ? [inspection_id] : [];
+    let where = 'WHERE 1=1';
+    const params = [];
+
+    if (inspection_id) {
+      where += ' AND inspection_id = ?';
+      params.push(inspection_id);
+    }
+
+    if (monitoring_only === 'true') {
+      where += ` AND (inspection_id IS NULL OR inspection_id = '')`;
+    }
 
     const stats = db.prepare(`
       SELECT
