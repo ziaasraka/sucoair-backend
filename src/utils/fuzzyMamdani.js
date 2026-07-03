@@ -1,140 +1,204 @@
 // ============================================================
 // fuzzyMamdani.js — Mesin Inferensi Fuzzy Mamdani ISPU
-// Versi diperbaiki:
-// - Fungsi trapmf mendukung left-shoulder dan right-shoulder
-// - ISPU akhir memakai parameter terburuk, bukan rata-rata semua kategori
-// - Menghasilkan ISPU per parameter untuk dashboard dan export laporan
+//
+// Disesuaikan dengan:
+// - Rumus fungsi keanggotaan segitiga μ[x,a,b,c]
+// - Kategori ISPU:
+//   Baik               : 0 - 50
+//   Sedang             : 51 - 100
+//   Tidak Sehat        : 101 - 199
+//   Sangat Tidak Sehat : 200 - 299
+//   Berbahaya          : > 300
+//
+// Catatan:
+// - Kategori tengah menggunakan trimf sesuai rumus gambar.
+// - Kategori ujung kiri dan kanan menggunakan shoulder function,
+//   supaya nilai sangat rendah tetap Baik dan nilai sangat tinggi
+//   tetap Berbahaya.
 // ============================================================
 
-// ── Fungsi Keanggotaan Dasar ─────────────────────────────────
 
+// ============================================================
+// Fungsi Keanggotaan Dasar
+// ============================================================
+
+/**
+ * Fungsi keanggotaan segitiga.
+ *
+ * Rumus:
+ * 0,                         x <= a atau x >= c
+ * (x - a) / (b - a),          a <= x <= b
+ * (c - x) / (c - b),          b <= x <= c
+ */
 function trimf(x, a, b, c) {
   x = Number(x);
 
   if (!Number.isFinite(x)) return 0;
-  if (x === b) return 1;
+
   if (x <= a || x >= c) return 0;
-  if (x < b) return (x - a) / (b - a);
-  return (c - x) / (c - b);
-}
-
-function trapmf(x, a, b, c, d) {
-  x = Number(x);
-
-  if (!Number.isFinite(x)) return 0;
-
-  // Left shoulder, contoh: trapmf(x, 0, 0, 15.5, 40)
-  // Nilai kecil dianggap penuh sebagai kategori tersebut
-  if (a === b && x <= b) return 1;
-
-  // Right shoulder, contoh: trapmf(x, 40, 50, 100, 100)
-  // Nilai sangat tinggi tetap kategori tersebut, bukan turun jadi 0
-  if (c === d && x >= c) return 1;
-
-  if (x <= a || x >= d) return 0;
-  if (x >= b && x <= c) return 1;
+  if (x === b) return 1;
 
   if (x > a && x < b) {
     return (x - a) / (b - a);
   }
 
-  if (x > c && x < d) {
-    return (d - x) / (d - c);
+  if (x > b && x < c) {
+    return (c - x) / (c - b);
   }
 
   return 0;
 }
 
-// ── Fuzzifikasi per Parameter ────────────────────────────────
+/**
+ * Fungsi bahu kiri.
+ * Digunakan untuk kategori "Baik".
+ *
+ * Nilai kecil dianggap penuh sebagai Baik.
+ * Setelah batas tertentu, derajat keanggotaannya turun.
+ */
+function leftShoulder(x, b, c) {
+  x = Number(x);
+
+  if (!Number.isFinite(x)) return 0;
+
+  if (x <= b) return 1;
+  if (x >= c) return 0;
+
+  return (c - x) / (c - b);
+}
+
+/**
+ * Fungsi bahu kanan.
+ * Digunakan untuk kategori "Berbahaya".
+ *
+ * Nilai tinggi dianggap penuh sebagai Berbahaya.
+ */
+function rightShoulder(x, a, b) {
+  x = Number(x);
+
+  if (!Number.isFinite(x)) return 0;
+
+  if (x <= a) return 0;
+  if (x >= b) return 1;
+
+  return (x - a) / (b - a);
+}
+
+
+// ============================================================
+// Fuzzifikasi per Parameter
+// ============================================================
+//
+// Nilai batas tetap memakai batas yang sudah ada pada sistem kamu.
+// Yang diubah adalah bentuk fungsi fuzzy-nya supaya sesuai rumus
+// segitiga dan kategori ISPU.
+// ============================================================
 
 function fuzzifyPM25(v) {
   return {
-    baik: trapmf(v, 0, 0, 15.5, 40),
+    baik: leftShoulder(v, 15.5, 40),
     sedang: trimf(v, 15.5, 40, 65),
     tidakSehat: trimf(v, 55, 90, 150),
     sangatTidakSehat: trimf(v, 110, 168, 210),
-    berbahaya: trapmf(v, 180, 250, 500, 500),
+    berbahaya: rightShoulder(v, 180, 250),
   };
 }
 
 function fuzzifyPM10(v) {
   return {
-    baik: trapmf(v, 0, 0, 50, 150),
+    baik: leftShoulder(v, 50, 150),
     sedang: trimf(v, 50, 150, 250),
     tidakSehat: trimf(v, 200, 300, 420),
     sangatTidakSehat: trimf(v, 350, 420, 500),
-    berbahaya: trapmf(v, 430, 500, 700, 700),
+    berbahaya: rightShoulder(v, 430, 500),
   };
 }
 
 function fuzzifyCO(v) {
   return {
-    baik: trapmf(v, 0, 0, 4.5, 9),
+    baik: leftShoulder(v, 4.5, 9),
     sedang: trimf(v, 4.5, 9, 15),
     tidakSehat: trimf(v, 12, 20, 30),
     sangatTidakSehat: trimf(v, 25, 35, 45),
-    berbahaya: trapmf(v, 40, 50, 100, 100),
+    berbahaya: rightShoulder(v, 40, 50),
   };
 }
 
 function fuzzifyNO2(v) {
   return {
-    baik: trapmf(v, 0, 0, 50, 100),
+    baik: leftShoulder(v, 50, 100),
     sedang: trimf(v, 50, 100, 200),
     tidakSehat: trimf(v, 150, 250, 400),
     sangatTidakSehat: trimf(v, 300, 500, 700),
-    berbahaya: trapmf(v, 600, 800, 1200, 1200),
+    berbahaya: rightShoulder(v, 600, 800),
   };
 }
 
 function fuzzifySO2(v) {
   return {
-    baik: trapmf(v, 0, 0, 52, 100),
+    baik: leftShoulder(v, 52, 100),
     sedang: trimf(v, 52, 100, 260),
     tidakSehat: trimf(v, 200, 365, 565),
     sangatTidakSehat: trimf(v, 400, 565, 800),
-    berbahaya: trapmf(v, 600, 800, 1200, 1200),
+    berbahaya: rightShoulder(v, 600, 800),
   };
 }
 
 function fuzzifyO3(v) {
   return {
-    baik: trapmf(v, 0, 0, 120, 200),
+    baik: leftShoulder(v, 120, 200),
     sedang: trimf(v, 120, 200, 235),
     tidakSehat: trimf(v, 200, 290, 400),
     sangatTidakSehat: trimf(v, 300, 400, 500),
-    berbahaya: trapmf(v, 420, 600, 1000, 1000),
+    berbahaya: rightShoulder(v, 420, 600),
   };
 }
 
-// ── Pusat Output Kategori ISPU ───────────────────────────────
+
+// ============================================================
+// Pusat Output ISPU
+// ============================================================
+//
+// Sesuai tabel:
+// Baik               : 0 - 50      pusat 25
+// Sedang             : 51 - 100    pusat 75
+// Tidak Sehat        : 101 - 199   pusat 150
+// Sangat Tidak Sehat : 200 - 299   pusat 250
+// Berbahaya          : > 300       pusat 400
+//
+// Karena Berbahaya tidak punya batas atas pasti, dipakai 400.
+// Kalau kamu ingin skala sampai 500, 400 masih masuk akal.
+// ============================================================
 
 const OUTPUT_CENTERS = {
   baik: 25,
   sedang: 75,
   tidakSehat: 150,
   sangatTidakSehat: 250,
-  berbahaya: 425,
+  berbahaya: 400,
 };
 
 const CATEGORY_ORDER = [
-  'baik',
-  'sedang',
-  'tidakSehat',
-  'sangatTidakSehat',
-  'berbahaya',
+  "baik",
+  "sedang",
+  "tidakSehat",
+  "sangatTidakSehat",
+  "berbahaya",
 ];
 
 const PARAM_LABEL = {
-  pm25: 'PM2.5',
-  pm10: 'PM10',
-  co: 'CO',
-  no2: 'NO2',
-  so2: 'SO2',
-  o3: 'O3',
+  pm25: "PM2.5",
+  pm10: "PM10",
+  co: "CO",
+  no2: "NO2",
+  so2: "SO2",
+  o3: "O3",
 };
 
-// ── Helper ───────────────────────────────────────────────────
+
+// ============================================================
+// Helper Perhitungan
+// ============================================================
 
 function weightedScore(membership) {
   let numerator = 0;
@@ -153,41 +217,61 @@ function weightedScore(membership) {
 }
 
 function kategoriFromIspu(ispu) {
-  if (ispu <= 50) {
-    return { kategori: 'Baik', kode: 1 };
+  const value = Number(ispu);
+
+  if (value <= 50) {
+    return {
+      kategori: "Baik",
+      kode: 1,
+    };
   }
 
-  if (ispu <= 100) {
-    return { kategori: 'Sedang', kode: 2 };
+  if (value <= 100) {
+    return {
+      kategori: "Sedang",
+      kode: 2,
+    };
   }
 
-  if (ispu <= 200) {
-    return { kategori: 'Tidak Sehat', kode: 3 };
+  if (value <= 199) {
+    return {
+      kategori: "Tidak Sehat",
+      kode: 3,
+    };
   }
 
-  if (ispu <= 300) {
-    return { kategori: 'Sangat Tidak Sehat', kode: 4 };
+  if (value <= 299) {
+    return {
+      kategori: "Sangat Tidak Sehat",
+      kode: 4,
+    };
   }
 
-  return { kategori: 'Berbahaya', kode: 5 };
+  return {
+    kategori: "Berbahaya",
+    kode: 5,
+  };
 }
 
 function buildParameterResult(key, rawValue, membership) {
   const ispu = weightedScore(membership);
-  const k = kategoriFromIspu(ispu);
+  const kategori = kategoriFromIspu(ispu);
 
   return {
     parameter: key,
     label: PARAM_LABEL[key],
     value: Number(rawValue),
     ispu,
-    kategori: k.kategori,
-    kode: k.kode,
+    kategori: kategori.kategori,
+    kode: kategori.kode,
     membership,
   };
 }
 
-// ── Fungsi Utama ─────────────────────────────────────────────
+
+// ============================================================
+// Fungsi Utama
+// ============================================================
 
 function hitungISPU(pm25, pm10, co, no2, so2, o3) {
   const nPm25 = Number(pm25);
@@ -205,29 +289,80 @@ function hitungISPU(pm25, pm10, co, no2, so2, o3) {
   const fO3 = fuzzifyO3(nO3);
 
   const perParameter = {
-    pm25: buildParameterResult('pm25', nPm25, fPM25),
-    pm10: buildParameterResult('pm10', nPm10, fPM10),
-    co: buildParameterResult('co', nCo, fCO),
-    no2: buildParameterResult('no2', nNo2, fNO2),
-    so2: buildParameterResult('so2', nSo2, fSO2),
-    o3: buildParameterResult('o3', nO3, fO3),
+    pm25: buildParameterResult("pm25", nPm25, fPM25),
+    pm10: buildParameterResult("pm10", nPm10, fPM10),
+    co: buildParameterResult("co", nCo, fCO),
+    no2: buildParameterResult("no2", nNo2, fNO2),
+    so2: buildParameterResult("so2", nSo2, fSO2),
+    o3: buildParameterResult("o3", nO3, fO3),
   };
 
-  // ISPU akhir memakai parameter dengan nilai ISPU tertinggi
-  const dominant = Object.values(perParameter).sort((a, b) => b.ispu - a.ispu)[0];
+  // ==========================================================
+  // ISPU Akhir
+  // ==========================================================
+  //
+  // Untuk ISPU udara, nilai akhir lebih aman memakai parameter
+  // terburuk atau nilai ISPU tertinggi.
+  //
+  // Kalau dirata-ratakan, polutan tinggi bisa tertutup oleh
+  // parameter lain yang rendah. Itu penyebab hasil sebelumnya
+  // terlihat "terlalu baik", sebuah keputusan matematika yang
+  // agak terlalu optimis untuk udara beracun.
+  // ==========================================================
+
+  const dominant = Object.values(perParameter).sort((a, b) => {
+    return b.ispu - a.ispu;
+  })[0];
 
   const ispu = dominant?.ispu || 0;
-  const { kategori, kode } = kategoriFromIspu(ispu);
+  const kategoriFinal = kategoriFromIspu(ispu);
 
-  // Agregasi membership tetap disediakan agar kompatibel dengan kode lama
   const aggregateMembership = {
-    baik: Math.max(fPM25.baik, fPM10.baik, fCO.baik, fNO2.baik, fSO2.baik, fO3.baik),
-    sedang: Math.max(fPM25.sedang, fPM10.sedang, fCO.sedang, fNO2.sedang, fSO2.sedang, fO3.sedang),
-    tidakSehat: Math.max(fPM25.tidakSehat, fPM10.tidakSehat, fCO.tidakSehat, fNO2.tidakSehat, fSO2.tidakSehat, fO3.tidakSehat),
-    sangatTidakSehat: Math.max(fPM25.sangatTidakSehat, fPM10.sangatTidakSehat, fCO.sangatTidakSehat, fNO2.sangatTidakSehat, fSO2.sangatTidakSehat, fO3.sangatTidakSehat),
-    berbahaya: Math.max(fPM25.berbahaya, fPM10.berbahaya, fCO.berbahaya, fNO2.berbahaya, fSO2.berbahaya, fO3.berbahaya),
+    baik: Math.max(
+      fPM25.baik,
+      fPM10.baik,
+      fCO.baik,
+      fNO2.baik,
+      fSO2.baik,
+      fO3.baik
+    ),
 
-    // Tambahan baru untuk dashboard dan laporan
+    sedang: Math.max(
+      fPM25.sedang,
+      fPM10.sedang,
+      fCO.sedang,
+      fNO2.sedang,
+      fSO2.sedang,
+      fO3.sedang
+    ),
+
+    tidakSehat: Math.max(
+      fPM25.tidakSehat,
+      fPM10.tidakSehat,
+      fCO.tidakSehat,
+      fNO2.tidakSehat,
+      fSO2.tidakSehat,
+      fO3.tidakSehat
+    ),
+
+    sangatTidakSehat: Math.max(
+      fPM25.sangatTidakSehat,
+      fPM10.sangatTidakSehat,
+      fCO.sangatTidakSehat,
+      fNO2.sangatTidakSehat,
+      fSO2.sangatTidakSehat,
+      fO3.sangatTidakSehat
+    ),
+
+    berbahaya: Math.max(
+      fPM25.berbahaya,
+      fPM10.berbahaya,
+      fCO.berbahaya,
+      fNO2.berbahaya,
+      fSO2.berbahaya,
+      fO3.berbahaya
+    ),
+
     per_parameter: perParameter,
     dominant_parameter: dominant?.parameter || null,
     dominant_label: dominant?.label || null,
@@ -235,12 +370,16 @@ function hitungISPU(pm25, pm10, co, no2, so2, o3) {
 
   return {
     ispu,
-    kategori,
-    kode,
+    kategori: kategoriFinal.kategori,
+    kode: kategoriFinal.kode,
+
     dominant_parameter: dominant?.parameter || null,
     dominant_label: dominant?.label || null,
+
     per_parameter: perParameter,
+
     membership: aggregateMembership,
+
     detail: {
       fuzzifikasiPM25: fPM25,
       fuzzifikasiPM10: fPM10,
@@ -253,4 +392,6 @@ function hitungISPU(pm25, pm10, co, no2, so2, o3) {
   };
 }
 
-module.exports = { hitungISPU };
+module.exports = {
+  hitungISPU,
+};
