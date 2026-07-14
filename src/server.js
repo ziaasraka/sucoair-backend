@@ -19,6 +19,7 @@ const companyRoutes = require('./routes/companies');
 const inspectionRoutes = require('./routes/inspections');
 const sensorRoutes = require('./routes/sensor');
 const reportRoutes = require('./routes/reports');
+const bakuMutuRoutes = require('./routes/bakuMutu');
 
 const app = express();
 const server = http.createServer(app);
@@ -69,6 +70,7 @@ app.use('/api/companies', companyRoutes);
 app.use('/api/inspections', inspectionRoutes);
 app.use('/api/sensor', sensorRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/baku-mutu', bakuMutuRoutes);
 
 // ── Health Check ──────────────────────────────────────────────
 app.get('/health', (req, res) => {
