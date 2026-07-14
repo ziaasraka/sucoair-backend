@@ -21,7 +21,7 @@ const {
   BAKU_MUTU,
   evaluateParameter,
   buildConclusion,
-} = require('../utils/bakuMutu');
+} = require('../utils/bakumutu');
 
 const router = express.Router();
 
